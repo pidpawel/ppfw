@@ -3,7 +3,7 @@ PPFW License
 
 Quick description
 -----------------
-It's MIT-based license, so you are free to use, modify, ane distribute this software until you include original copyright notice but you are not alowed to sell this software. This software is provided *as is* and I give you *no warranty* of any kind. This license *may* change in future.
+It's MIT-based license, so you are free to use, modify, ane distribute this software until you include original copyright notice but you are not alowed to sell this software. This software is provided **as is** and I give you **no warranty** of any kind. This license **may** change in future.
 
 Actual text
 -----------
