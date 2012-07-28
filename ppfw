@@ -1,0 +1,342 @@
+#!/usr/bin/python
+import os,sys
+import configparser
+import subprocess
+import socket
+import re
+
+if not os.geteuid() == 0:
+    sys.exit("You have to be root to use this script")
+
+config = configparser.ConfigParser(allow_no_value=True, empty_lines_in_values=False, delimiters="=", inline_comment_prefixes="#")
+config.optionxform = str
+config.read("/etc/ppfw.conf")
+pretend = config.getboolean('core', 'pretend', fallback=False)
+verbosity = config.getint('core', 'verbosity', fallback=1)
+
+ipv4_regexp = re.compile("(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)", re.IGNORECASE)
+ipv6_regexp = re.compile("\s*((([0-9A-Fa-f]{1,4}:){7}([0-9A-Fa-f]{1,4}|:))|(([0-9A-Fa-f]{1,4}:){6}(:[0-9A-Fa-f]{1,4}|((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3})|:))|(([0-9A-Fa-f]{1,4}:){5}(((:[0-9A-Fa-f]{1,4}){1,2})|:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3})|:))|(([0-9A-Fa-f]{1,4}:){4}(((:[0-9A-Fa-f]{1,4}){1,3})|((:[0-9A-Fa-f]{1,4})?:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}))|:))|(([0-9A-Fa-f]{1,4}:){3}(((:[0-9A-Fa-f]{1,4}){1,4})|((:[0-9A-Fa-f]{1,4}){0,2}:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}))|:))|(([0-9A-Fa-f]{1,4}:){2}(((:[0-9A-Fa-f]{1,4}){1,5})|((:[0-9A-Fa-f]{1,4}){0,3}:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}))|:))|(([0-9A-Fa-f]{1,4}:){1}(((:[0-9A-Fa-f]{1,4}){1,6})|((:[0-9A-Fa-f]{1,4}){0,4}:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}))|:))|(:(((:[0-9A-Fa-f]{1,4}){1,7})|((:[0-9A-Fa-f]{1,4}){0,5}:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}))|:)))(%.+)?\s*", re.IGNORECASE)
+
+def search_ipv4(s):
+    return True if ipv4_regexp.search(s) else False
+def search_ipv6(s):
+    return True if ipv6_regexp.search(s) else False
+def search_version(s):
+    v4 = search_ipv4(s)
+    v6 = search_ipv6(s)
+    if v4 and v6: return 'both'
+    elif v4: return 'v4'
+    elif v6: return 'v6'
+    else: return None
+
+def get_addrs(domain):
+    addrs = []
+    for addr in socket.getaddrinfo(domain, None):
+        if addr[4][0] not in addrs:
+            addrs.append(addr[4][0])
+    return addrs
+
+def add_rule(params, version='both'):
+    if version=='both':
+        vv = search_version(params)
+        if vv in ('v4', 'v6'):
+            do = [vv]
+        else:
+            do = ['v4', 'v6']
+    elif version in ('v4', 'v6'):
+        do = [version]
+    else:
+        if verbosity > 1:
+            print("Wrong version specified.")
+        return False
+    r = []
+    for v in do:
+        if config.getboolean('core', 'use_'+v, fallback=True):
+            verb = config.get('paths', 'iptables_'+v, fallback="/sbin/ip"+("" if v=="v4" else "6")+"tables") + " " + params
+            if v == "v6":
+                verb = verb.replace("icmp", "icmpv6")
+            if verbosity > 3: print(">> "+verb)
+            if not pretend:
+                r.append(subprocess.call(verb, shell = True))
+    for a in r:
+        if not a == 0:
+            if verbosity > 0:
+                print("!"*70)
+                print("> One or more rules contain errors.")
+            return False        
+
+def add_both(params):
+    add_rule(params, version='both')
+def add_v4(params):
+    add_rule(params, version='v4')
+def add_v6(params):
+    add_rule(params, version='v6')
+
+def add_sysrule(name, value):
+    task = ["sysctl", "-wq", name+"="+str(value)]
+    if verbosity > 3: print(">> "+" ".join(task))
+    if not pretend:
+        return subprocess.call(task)
+
+def get_config_custom(section, option, available, fallback=False):
+    r = config.get(section, option, fallback=fallback).upper()
+    if r in available:
+        return r
+    else:
+        if verbosity > 1: print("Possibly wrong value in config file at "+section+"/"+option+". Available values: "+ ", ".join(available))
+        return fallback
+
+def get_config_ad(section, option, fallback="deny"):
+    return get_config_custom(section, option, ['ACCEPT', 'DENY', 'DROP'], fallback=fallback).replace("DENY", "DROP")
+
+def add_log(params, name, fallback=-1):
+    if config.getint('logging', name, fallback=fallback) >= 0:
+        add_both(params + " " +
+            (("-m limit --limit "+str(config.getint('logging', name, fallback=fallback))+"/min ") if config.getint('logging', name, fallback=fallback) > 0 else "" ) +
+            "-j LOG --log-level debug --log-prefix \"PPFW:"+name.upper()+":\"")
+
+def iptables_flush():
+    if verbosity > 1: print("> Cleaning firewall…")
+    add_both("-F") # Flush all chains
+    add_both("-X") # Delete user-defined chains
+    add_both("-Z") # Zero packet-counters etc
+
+def iptables_policies():
+    if verbosity > 1: print("> Setting new policies…")
+    add_both("-P INPUT "+get_config_ad('policies', 'input', fallback='deny'))
+    add_both("-P OUTPUT "+get_config_ad('policies', 'output', fallback='accept'))
+    add_both("-P FORWARD "+get_config_ad('policies', 'forward', fallback='deny'))
+
+def iptables_invalid():
+    if verbosity > 1: print("> Dropping invalid packets.")
+    add_log("-A INPUT -m state --state INVALID", 'invalid', fallback=12)
+    add_both("-A INPUT -m state --state INVALID -j DROP")
+
+def iptables_loopback():
+    if verbosity > 1: print("> Setting loopback policy…")
+    add_both("-A INPUT -i lo -j ACCEPT")
+    add_both("-A OUTPUT -o lo -j ACCEPT")
+    
+def iptables_established():
+    if verbosity > 1: print("> Accepting established and related packets.")
+    add_both("-A INPUT -m state --state ESTABLISHED -j ACCEPT")
+    add_both("-A INPUT -m state --state RELATED -j ACCEPT")
+
+def iptables_icmp():
+    if verbosity > 1: print("> Adding ICMP rules…")
+    add_both("-A INPUT -p icmp --icmp-type echo-request -j "+get_config_ad('policies', 'incoming_icmp', fallback="accept"))
+    add_both("-A OUTPUT -p icmp --icmp-type echo-reply -j "+get_config_ad('policies', 'incoming_icmp', fallback="accept"))
+    add_both("-A OUTPUT -p icmp --icmp-type echo-request -j ACCEPT")
+    add_both("-A INPUT -p icmp --icmp-type echo-reply -j ACCEPT")
+
+def iptables_raw():
+    if 'raw_rules' in config.sections() or 'raw_rules_v4' in config.sections() or 'raw_rules_v6' in config.sections():
+        if verbosity > 1: print("> Applying user's raw rules…")
+        for ver in ['', '_v4', '_v6']:
+            if config.has_section('raw_rules'+ver):
+                for item in config.items('raw_rules'+ver):
+                    item = "=".join(tuple(filter(None, item)))
+                    if ver == '': add_both(item)
+                    elif ver == '_v4': add_v4(item)
+                    else: add_v6(item)
+
+def banlist():
+    if config.has_section('bans'):
+        if verbosity > 1: print("> Parsing banlist…")
+        for item in config.items('bans'):
+            item = "=".join(tuple(filter(None, item)))
+            for addr in get_addrs(item):
+                add_both("-A INPUT -s "+addr+" -j DROP")
+
+def exceptions():
+    if config.has_section('exceptions'):
+        if verbosity > 1: print("> Adding exceptions…")
+        for item in config.items('exceptions'):
+            item = "=".join(tuple(filter(None, item)))
+            for addr in get_addrs(item):
+                add_both("-A INPUT -s "+addr+" -j ACCEPT")
+
+def predefined_sysfs():
+    add_sysrule("net.ipv4.tcp_syncookies", 1) # enable syn cookies (prevent against the common 'syn flood attack')
+    add_sysrule("net.ipv4.icmp_echo_ignore_broadcasts", 1) # ignore all ICMP ECHO and TIMESTAMP requests sent to it via broadcast/multicast
+    add_sysrule("net.ipv4.ip_forward", 0) # disable Packet forwarning between interfaces
+    add_sysrule("net.ipv4.icmp_ignore_bogus_error_responses", 1) # disable logging of bogus responses to broadcast frames
+    add_sysrule("net.ipv4.conf.all.log_martians", 1) # log packets with impossible addresses to kernel log
+    add_sysrule("net.ipv4.conf.all.rp_filter", 1) # do source validation by reversed path (Recommended option for single homed hosts)
+    add_sysrule("net.ipv4.conf.all.send_redirects", 0) # don't send redirects
+    add_sysrule("net.ipv4.conf.all.accept_source_route", 0) # don't accept packets with SRR option
+    add_sysrule("net.ipv4.conf.all.accept_redirects", 0) # don't accept routers' redirects
+    add_sysrule("net.ipv4.conf.all.secure_redirects", 0) # …neither from „trusted” hosts
+    add_sysrule("net.ipv4.conf.all.send_redirects", 0) # don't make mess
+    add_sysrule("net.ipv4.conf.all.proxy_arp", 0) # don't reply to some ARP requests
+    # add_sysrule("net.ip_always_defrag", 1) # always defragment packets before passing them to firewall
+    add_sysrule("net.ipv4.icmp_ignore_bogus_error_responses", 1) # ignore invalid ICMP responses
+
+def user_sysfs():
+    if config.has_section('sysfs'):
+        if verbosity > 1: print("> Adding user's sysfs rules…")
+        for item in config.items('sysfs'):
+            add_sysrule(item[0], item[1])
+
+def human_parse():
+    if config.has_section('rules'):
+        for item in config.items('rules'):
+            item = "=".join(tuple(filter(None, item))).lower()
+            itemp = item.split(" ")
+            if verbosity > 3: print("> User's rule: " +item)
+
+            action = itemp[0].upper().replace('ALLOW', 'ACCEPT').replace("DENY", "REJECT")
+            if not action in ('ACCEPT', 'DENY', 'LOG', 'DROP', 'REJECT', 'REDIRECT'):
+                print("Unknown action "+itemp[0]+" in: "+item)
+            protocol = itemp[1].lower()
+            if not protocol in ('all', 'any', 'tcp', 'udp', 'icmp'):            
+                print("Unknown protocol "+itemp[1]+" in: "+item)
+
+            cur_dir = 'from'
+            pass1 = False
+            
+            fr = None
+            to = None
+            sport = None
+            dport = None
+            ieth = None
+            oeth = None
+            limit = None
+            burst = None
+
+            for it in range(2,len(itemp)-1):
+                i = itemp[it]
+                if pass1:
+                    pass1 = False
+                else:
+                    next = itemp[it+1]
+                    if i == 'from':
+                        cur_dir = 'from'
+                        if next not in ('to', 'port', 'ports', 'eth', 'limit', 'burst'):
+                            pass1 = True
+                            fr = next
+                    elif i == 'to':
+                        cur_dir = 'to'
+                        if next not in ('from', 'port', 'ports', 'eth', 'limit', 'burst'):
+                            pass1 = True
+                            to = next
+                    elif i in ('port', 'ports', 'eth', 'limit', 'burst'):
+                        pass1 = True
+                        if cur_dir == 'from':
+                            if i in ('port', 'ports'):
+                                sport = next
+                            elif i == 'eth':
+                                oeth = next
+                        else:
+                            if i in ('port', 'ports'):
+                                dport = next
+                            elif i == 'eth':
+                                ieth = next
+                        if i == 'limit':
+                            limit = next
+                        elif i == 'burst':
+                            burst = next
+
+            if fr == 'me':
+                chain = "OUTPUT"
+            else:
+                chain = "INPUT"
+
+            if verbosity > 4:
+                print("Chain: " + chain)
+                print("Action: " + action)
+                print("Protocol: " + protocol)
+
+                if fr is not None: print("From: "+str(fr))
+                if sport is not None: print("Sport: "+str(sport))
+                if ieth is not None: print("ieth: "+str(ieth))
+
+                if dport is not None: print("Dport: "+str(dport))        
+                if oeth is not None: print("oeth: "+str(oeth))
+
+                if limit is not None: print("limit: "+str(limit))        
+                if burst is not None: print("burst: "+str(burst))
+
+            proto_duplicate = False
+
+            rule = ""
+            if action == 'REDIRECT':
+                rule += "-t nat -A PREROUTING "
+            else:
+                rule += "-A " + chain + " "
+
+            if not protocol in ('all', 'any'): rule += "-p " + protocol + " "
+            else:
+                rule += "-p tcp "
+                proto_duplicate = True
+
+            if fr is not None and not fr in ('world', 'any', 'all', 'me'): rule += "-s " + fr + " "
+
+            if ieth is not None: rule += "-i " + ieth + " "
+            if oeth is not None: rule += "-o " + oeth + " "
+
+            if action == 'REDIRECT':
+                if sport is not None:
+                    if ',' in sport: rule += "-m multiport --dports " + sport + " "
+                    else: rule += "--dport " + sport + " "
+
+                if dport is not None:
+                    action = "REDIRECT --to-port "+dport
+            else:
+                if sport is not None:
+                    if ',' in sport: rule += "-m multiport --sports " + sport + " "
+                    else: rule += "--sport " + sport + " "
+                if to is not None and not to in ('world', 'any', 'all', 'me'): rule += "-d " + to + " "
+                if dport is not None:
+                    if ',' in dport: rule += "-m multiport --dports " + dport + " "
+                    else: rule += "--dport " + dport + " "
+
+            if limit is not None:
+                rule += "-m limit --limit " + limit + " "
+                if burst is not None:
+                    rule += "--limit-burst " + burst + " "
+            rule += "-j " + action
+            
+            if action.startswith('REDIRECT'):
+                add_v4(rule)
+                add_v6(rule.replace('-t nat', '-t mangle').replace('-j REDIRECT --to-port', '-j TPROXY --on-port'))
+            else:
+                add_both(rule)
+            if proto_duplicate:
+                add_both(rule.replace("-p tcp ", "-p udp "))
+
+if __name__ == '__main__':
+    if config.getboolean('core', 'use_v4', fallback=True) == False and config.getboolean('core', 'use_v6', fallback=True) == False:
+        sys.exit("You have to specify at least one IP version to run this program.")
+
+    import argparse
+    parser = argparse.ArgumentParser(description='PPFW firewall configuration suite.')
+    parser.add_argument('action', choices=('start', 'stop', 'restart', 'reload', 'test'))
+    parser.add_argument('--pretend', '-p', action='store_true', help='don\'t execute commands, just generate them')
+    parser.add_argument('--verbosity', '-v', type=int, help='don\'t execute commands, just generate them')
+    args = parser.parse_args()
+
+    if args.pretend or args.action == 'test': pretend = True
+    if args.verbosity: verbosity = args.verbosity
+        
+    if verbosity > 1: print("> Configuration for IPv4 " + ("will" if config.getboolean('core', 'use_v4', fallback=True) else "*won't*") + " be generated.")
+    if verbosity > 1: print("> Configuration for IPv6 " + ("will" if config.getboolean('core', 'use_v6', fallback=True) else "*won't*") + " be generated.")
+    
+    if args.action == 'stop':
+        iptables_flush()
+    elif args.action in ('start', 'restart', 'test'):
+        predefined_sysfs()
+        user_sysfs()
+        iptables_flush()
+        iptables_policies()
+        iptables_invalid()
+        iptables_loopback()
+        iptables_established()
+        iptables_icmp()
+        iptables_raw()
+        exceptions()
+        banlist()
+        human_parse()
+
+    if verbosity > 1: print("> Firewall loaded.")
+    

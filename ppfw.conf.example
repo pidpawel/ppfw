@@ -1,0 +1,50 @@
+# This configuration file is a part of PPFW
+
+[core]
+# use_v4 = yes
+# use_v6 = yes
+# pretend = false
+verbosity = 2 # >=5 - debug, 4 - shows all commands, 2 - recommended
+
+[rules] # Human-like readable rules
+# <allow/deny/redirect> <any/tcp/udp/icmp> [from [host]] [port <port>] [to [host]] [port <port>] [limit <limit> [burst <burst>]]
+allow tcp from any to port 22                # Allow all incoming tcp traffic to port 22
+allow any from my.home.computer              # Allow all traffic from my home computer
+deny icmp from terrible.flooders.host        # Deny all icmp traffic from terrible.flooders.host
+allow any from me to port 80                 # Allow outgoing traffic to port 80
+allow any from me to servers.in.my.company   # Allow connecting from this mashine to servers.in.my.company
+redirect tcp from port 22 to port 2345       # Redirect tcp traffic from port 22 to port 2345
+reject any                                   # Reject any other traffic
+
+[exceptions] # Hostnames or IP's, one per line, *allows* *all* traffic, IPv4 or IPv6
+# 192.168.1.1/24
+# my.friends.host
+# 2001:500:88:200::10
+
+[bans] # Hostnames or IP's, one per line, bans *all* traffic, IPv4 or IPv6
+# 192.168.2.3
+# very.bad.drone
+# 2001:500:88:200::11
+
+[policies]
+input = deny
+output = accept
+forward = deny
+incoming_icmp = accept
+
+# [logging] # Set -1 to disable, 0 to log every(only for debug!), otherwise means n per minute
+# invalid = 1
+
+# [paths]
+# iptables_v4 = /sbin/iptables
+# iptables_v6 = /sbin/ip6tables
+
+# [sysfs] # In dot format, accepts not only integers
+# net.ipv4.conf.all.accept_source_route = 0
+
+# Raw rules are inserted *before* main rules, but after initialisation
+# Remember to skip _ip(6)tables_ command.
+# [raw_rules] # Raw iptables rules, applying to both IPv4 and IPv6
+# [raw_rules_v4] # Raw iptables rules, applying only to IPv4
+# [raw_rules_v6] # Raw iptables rules, applying only to IPv6
+
