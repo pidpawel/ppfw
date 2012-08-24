@@ -74,7 +74,7 @@ def add_v6(params):
     add_rule(params, version='v6')
 
 def add_sysrule(name, value):
-    task = ["sysctl", "-wq", name+"="+str(value)]
+    task = ["sysctl", "-q", "-w", name+"="+str(value)]
     if verbosity > 3: print(">> "+" ".join(task))
     if not pretend:
         return subprocess.call(task)
